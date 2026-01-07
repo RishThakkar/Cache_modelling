@@ -109,3 +109,6 @@ mkdir -p build
 cmake -S . -B build
 cmake --build build -j
 ./build/cache_sim
+
+if you want to PLOT:
+python3 plotter.py
