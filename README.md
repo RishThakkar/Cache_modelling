@@ -100,3 +100,12 @@ It is meant to be extended:
 - C++17 or later
 - Standard C++ library
 - (Optional) Python 3 with pandas and matplotlib for plotting
+
+---
+
+## How to Run
+
+mkdir -p build
+cmake -S . -B build
+cmake --build build -j
+./build/cache_sim
