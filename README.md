@@ -105,10 +105,10 @@ It is meant to be extended:
 
 ## How to Run
 
-mkdir -p build
-cmake -S . -B build
-cmake --build build -j
-./build/cache_sim
+- mkdir -p build
+- cmake -S . -B build
+- cmake --build build -j
+- ./build/run_experiments
 
 if you want to PLOT:
-python3 plotter.py
+python3 python/plotter.py

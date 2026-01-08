@@ -1,0 +1,30 @@
+# ---- Build artifacts ----
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# ---- Compiler outputs ----
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.exe
+
+# ---- Generated outputs ----
+results.csv
+python/plots/
+
+# ---- Editor / OS noise ----
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.venv/
+venv/
