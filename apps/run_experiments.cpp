@@ -3,7 +3,7 @@
 #include <iostream>
 #include <vector>
 
-#include "cache_model.h"
+#include "cache/cache_model.h"
 
 static void run_sequential(Cache& cache, uint64_t bytes, uint64_t step_bytes) {
     uint64_t lat = 0;

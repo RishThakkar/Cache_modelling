@@ -1,4 +1,4 @@
-#include "cache_model.h"
+#include "cache/cache_model.h"
 #include <stdexcept>
 
 Cache::Cache(size_t cache_size,
