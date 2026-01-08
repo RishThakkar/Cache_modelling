@@ -6,6 +6,7 @@
 #include <iostream>
 
 #include "cache/replacement_policy.h"
+#include "cache/types.h"
 
 class Cache {
 public:
@@ -14,6 +15,14 @@ public:
           size_t associativity,
           size_t hit_latency,
           size_t miss_penalty,
+          ReplacementPolicy policy = ReplacementPolicy::LRU);
+        
+    //New Constructor for realistic miss penalty
+    Cache(size_t cache_size,
+          size_t line_size,
+          size_t associativity,
+          size_t hit_latency,
+          MemoryTiming mem_timing,
           ReplacementPolicy policy = ReplacementPolicy::LRU);
 
     bool access(uint64_t address, uint64_t& latency);
@@ -43,6 +52,9 @@ private:
 
     uint64_t access_counter = 0;
 
+    MemoryTiming mem_timing{};
+    bool use_mem_timing = false;
+
     struct CacheLine {
         bool valid = false;
         uint64_t tag = 0;
@@ -70,4 +82,9 @@ private:
 
     CacheLine* pick_victim(CacheSet& set);
     uint64_t next_rand();
+
+    size_t effective_miss_penalty_cycles() const {
+        if (use_mem_timing) return mem_timing.miss_service_cycles(line_size);
+        return miss_penalty;
+    }
 };

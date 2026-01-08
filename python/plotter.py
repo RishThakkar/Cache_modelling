@@ -2,130 +2,142 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-# ---- Config ----
-CSV_PATH = "results.csv"   # run from repo root
+CSV_PATH = "results.csv"          # run from repo root
 OUT_DIR = Path("python/plots")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 df = pd.read_csv(CSV_PATH)
 
-def save_line_plot(d, x, y, title, xlabel, ylabel, filename):
-    if d.empty:
-        print(f"[WARN] Empty dataset for: {title}")
-        return
+# Candidate sweep axes in priority order
+CANDIDATE_X = [
+    "cache_kb",
+    "working_set_kb",
+    "assoc",
+    "line_size",
+    "stride_bytes",
+    "miss_penalty",
+    "hit_latency",
+    "policy",  # categorical
+]
 
-    d = d.sort_values(x)
-    plt.figure()
-    plt.plot(d[x], d[y], marker="o")
-    plt.title(title)
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    plt.grid(True)
-    path = OUT_DIR / filename
-    plt.savefig(path, dpi=200, bbox_inches="tight")
-    plt.close()
-    print(f"Wrote {path}")
+METRICS = ["miss_rate", "amat"]
 
-def save_bar_plot(d, x, y, title, xlabel, ylabel, filename):
-    if d.empty:
-        print(f"[WARN] Empty dataset for: {title}")
-        return
+def pick_x_column(d: pd.DataFrame) -> str | None:
+    """
+    Pick an x-axis column automatically:
+    - Prefer numeric columns that vary (nunique > 1)
+    - If only 'policy' varies, use policy
+    - If multiple vary, pick the first by priority in CANDIDATE_X
+    """
+    nunique = {c: d[c].nunique(dropna=False) for c in CANDIDATE_X if c in d.columns}
 
-    # Keep a stable order (use current appearance order unless you want alphabetical)
-    if x == "policy":
+    # Pick first varying column by priority
+    for c in CANDIDATE_X:
+        if c in nunique and nunique[c] > 1:
+            return c
+    return None
+
+def is_categorical_x(xcol: str) -> bool:
+    return xcol == "policy"
+
+def stable_sort(d: pd.DataFrame, xcol: str) -> pd.DataFrame:
+    d = d.copy()
+    if xcol == "policy":
         order = ["LRU", "FIFO", "RANDOM"]
-        d["policy"] = pd.Categorical(d["policy"], categories=order, ordered=True)
-        d = d.sort_values("policy")
+        if "policy" in d.columns:
+            d.loc[:, "policy"] = pd.Categorical(d["policy"], categories=order, ordered=True)
+        return d.sort_values("policy")
     else:
-        d = d.sort_values(x)
+        return d.sort_values(xcol)
 
+def plot_line(d: pd.DataFrame, xcol: str, ycol: str, title: str, xlabel: str, outpath: Path):
+    d = stable_sort(d, xcol)
     plt.figure()
-    plt.bar(d[x].astype(str), d[y])
+    plt.plot(d[xcol], d[ycol], marker="o")
     plt.title(title)
     plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    plt.grid(True, axis="y")
-    path = OUT_DIR / filename
-    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.ylabel(ycol)
+    plt.grid(True)
+    plt.savefig(outpath, dpi=200, bbox_inches="tight")
     plt.close()
-    print(f"Wrote {path}")
+    print(f"Wrote {outpath}")
 
-# ---------------------------
-# Baseline (single row)
-# ---------------------------
-baseline = df[df["experiment"] == "baseline"]
-if not baseline.empty:
-    row = baseline.iloc[0]
-    print("Baseline:")
-    print(row.to_string())
-    print()
+def plot_bar(d: pd.DataFrame, xcol: str, ycol: str, title: str, xlabel: str, outpath: Path):
+    d = stable_sort(d, xcol)
+    plt.figure()
+    plt.bar(d[xcol].astype(str), d[ycol])
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ycol)
+    plt.grid(True, axis="y")
+    plt.savefig(outpath, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"Wrote {outpath}")
 
-# ---------------------------
-# 1) Cache size sweep
-# ---------------------------
-d = df[df["experiment"] == "sweep_cache_size"]
-save_line_plot(
-    d, x="cache_kb", y="miss_rate",
-    title="Miss rate vs Cache size (reuse working set)",
-    xlabel="Cache size (KB)", ylabel="Miss rate",
-    filename="sweep_cache_size_miss_rate.png"
-)
-save_line_plot(
-    d, x="cache_kb", y="amat",
-    title="AMAT vs Cache size (reuse working set)",
-    xlabel="Cache size (KB)", ylabel="AMAT (cycles)",
-    filename="sweep_cache_size_amat.png"
-)
+def safe_name(s: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in s)
 
-# ---------------------------
-# 2) Associativity sweep
-# ---------------------------
-d = df[df["experiment"] == "sweep_associativity"]
-save_line_plot(
-    d, x="assoc", y="miss_rate",
-    title="Miss rate vs Associativity (same-set conflict trace)",
-    xlabel="Associativity (ways)", ylabel="Miss rate",
-    filename="sweep_associativity_miss_rate.png"
-)
-save_line_plot(
-    d, x="assoc", y="amat",
-    title="AMAT vs Associativity (same-set conflict trace)",
-    xlabel="Associativity (ways)", ylabel="AMAT (cycles)",
-    filename="sweep_associativity_amat.png"
-)
+# Optional: show baseline rows in terminal if present
+if "experiment" in df.columns:
+    base = df[df["experiment"].str.contains("baseline", na=False)]
+    if not base.empty:
+        print("Baseline rows:")
+        print(base.to_string(index=False))
+        print()
 
-# ---------------------------
-# 3) Line size sweep
-# ---------------------------
-d = df[df["experiment"] == "sweep_line_size"]
-save_line_plot(
-    d, x="line_size", y="miss_rate",
-    title="Miss rate vs Line size (sequential stream)",
-    xlabel="Line size (bytes)", ylabel="Miss rate",
-    filename="sweep_line_size_miss_rate.png"
-)
-save_line_plot(
-    d, x="line_size", y="amat",
-    title="AMAT vs Line size (sequential stream)",
-    xlabel="Line size (bytes)", ylabel="AMAT (cycles)",
-    filename="sweep_line_size_amat.png"
-)
+# Generate plots per experiment
+experiments = sorted(df["experiment"].unique())
 
-# ---------------------------
-# 4) Replacement policy sweep (categorical)
-# ---------------------------
-d = df[df["experiment"] == "sweep_policy"]
-save_bar_plot(
-    d, x="policy", y="miss_rate",
-    title="Miss rate vs Replacement policy (same-set conflict trace)",
-    xlabel="Policy", ylabel="Miss rate",
-    filename="sweep_policy_miss_rate.png"
-)
-save_bar_plot(
-    d, x="policy", y="amat",
-    title="AMAT vs Replacement policy (same-set conflict trace)",
-    xlabel="Policy", ylabel="AMAT (cycles)",
-    filename="sweep_policy_amat.png"
-)
+for exp in experiments:
+    d = df[df["experiment"] == exp].copy()
+    if d.empty:
+        continue
+
+    xcol = pick_x_column(d)
+    if xcol is None:
+        print(f"[SKIP] {exp}: No varying parameter found (all candidate x columns constant).")
+        continue
+
+    # Create a short description string for titles
+    # We'll show non-varying key params to give context in the title.
+    context_cols = ["cache_kb", "line_size", "assoc", "hit_latency", "miss_penalty", "policy", "trace"]
+    context_parts = []
+    for c in context_cols:
+        if c in d.columns and d[c].nunique(dropna=False) == 1 and c != xcol:
+            context_parts.append(f"{c}={d[c].iloc[0]}")
+    context = ", ".join(context_parts[:4])  # keep title short
+
+    xlabel = xcol
+    if xcol == "cache_kb":
+        xlabel = "Cache size (KB)"
+    elif xcol == "working_set_kb":
+        xlabel = "Working set (KB)"
+    elif xcol == "assoc":
+        xlabel = "Associativity (ways)"
+    elif xcol == "line_size":
+        xlabel = "Line size (bytes)"
+    elif xcol == "stride_bytes":
+        xlabel = "Stride (bytes)"
+    elif xcol == "miss_penalty":
+        xlabel = "Miss penalty (cycles)"
+    elif xcol == "hit_latency":
+        xlabel = "Hit latency (cycles)"
+    elif xcol == "policy":
+        xlabel = "Replacement policy"
+
+    for metric in METRICS:
+        if metric not in d.columns:
+            continue
+
+        title = f"{exp}: {metric} vs {xcol}"
+        if context:
+            title += f" ({context})"
+
+        outpath = OUT_DIR / f"{safe_name(exp)}_{metric}.png"
+
+        if is_categorical_x(xcol):
+            plot_bar(d, xcol, metric, title, xlabel, outpath)
+        else:
+            plot_line(d, xcol, metric, title, xlabel, outpath)
 
 print("\nDone. Open images in:", OUT_DIR)

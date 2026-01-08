@@ -35,6 +35,42 @@ Cache::Cache(size_t cache_size,
     rng_state ^= (cache_size * 1315423911ULL) ^ (line_size * 2654435761ULL) ^ (associativity * 889523592379ULL);
 }
 
+Cache::Cache(size_t cache_size,
+             size_t line_size,
+             size_t associativity,
+             size_t hit_latency,
+             MemoryTiming mem_timing,
+             ReplacementPolicy policy)
+    : cache_size(cache_size),
+      line_size(line_size),
+      associativity(associativity),
+      hit_latency(hit_latency),
+      miss_penalty(0),          // not used when use_mem_timing=true
+      policy(policy),
+      mem_timing(mem_timing),
+      use_mem_timing(true)
+{
+    if (line_size == 0 || associativity == 0) {
+        throw std::invalid_argument("line_size and associativity must be > 0");
+    }
+    if (cache_size == 0 || cache_size % (line_size * associativity) != 0) {
+        throw std::invalid_argument("cache_size must be a multiple of (line_size * associativity)");
+    }
+
+    num_sets = cache_size / (line_size * associativity);
+    if (num_sets == 0) {
+        throw std::invalid_argument("num_sets computed as 0 (check parameters)");
+    }
+
+    sets.resize(num_sets);
+    for (auto& set : sets) {
+        set.lines.resize(associativity);
+    }
+
+    rng_state ^= (cache_size * 1315423911ULL) ^ (line_size * 2654435761ULL) ^ (associativity * 889523592379ULL);
+}
+
+
 uint64_t Cache::extract_index(uint64_t addr) const {
     return (addr / line_size) % num_sets;
 }
@@ -110,7 +146,7 @@ bool Cache::access(uint64_t address, uint64_t& latency) {
 
     // Miss
     misses++;
-    latency = hit_latency + miss_penalty;
+    latency = hit_latency + effective_miss_penalty_cycles();
 
     // Victim selection
     CacheLine* victim = pick_victim(set);
@@ -129,7 +165,7 @@ bool Cache::access(uint64_t address, uint64_t& latency) {
 void Cache::print_stats() const {
     const uint64_t total = hits + misses;
     const double miss_rate = (total == 0) ? 0.0 : static_cast<double>(misses) / static_cast<double>(total);
-    const double amat = static_cast<double>(hit_latency) + miss_rate * static_cast<double>(miss_penalty);
+    double amat = static_cast<double>(hit_latency) + miss_rate * static_cast<double>(effective_miss_penalty_cycles());
 
     std::cout << "Hits: " << hits << "\n";
     std::cout << "Misses: " << misses << "\n";
@@ -164,5 +200,5 @@ double Cache::get_miss_rate() const {
 }
 
 double Cache::get_amat() const {
-    return static_cast<double>(hit_latency) + get_miss_rate() * static_cast<double>(miss_penalty);
+    return static_cast<double>(hit_latency) + get_miss_rate() * static_cast<double>(effective_miss_penalty_cycles());
 }

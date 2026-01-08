@@ -9,11 +9,10 @@
 #include "cache/replacement_policy.h"
 
 // -----------------------------
-// Trace patterns (simple + reusable)
+// Trace patterns
 // -----------------------------
 
-// 1) Streaming sequential: strong spatial locality, almost no temporal reuse
-// Miss rate is mostly ~ step / line_size (cold, single pass)
+// Streaming sequential: strong spatial locality, minimal temporal reuse.
 static void trace_stream_sequential(Cache& cache, uint64_t bytes, uint64_t step_bytes) {
     uint64_t lat = 0;
     for (uint64_t addr = 0; addr < bytes; addr += step_bytes) {
@@ -21,8 +20,7 @@ static void trace_stream_sequential(Cache& cache, uint64_t bytes, uint64_t step_
     }
 }
 
-// 2) Reuse working set: shows capacity effects clearly (cache size matters)
-// Multiple passes over a fixed working set -> after warm-up, if WS fits, misses drop a lot.
+// Reuse working set: shows capacity effects (cache size matters).
 static void trace_reuse_working_set(Cache& cache, uint64_t working_set_bytes, uint64_t step_bytes, uint64_t passes) {
     uint64_t lat = 0;
     for (uint64_t p = 0; p < passes; p++) {
@@ -32,16 +30,10 @@ static void trace_reuse_working_set(Cache& cache, uint64_t working_set_bytes, ui
     }
 }
 
-// 3) Conflict pattern: demonstrates associativity benefits
-// Touch (hot_lines) addresses that map to the same set by spacing them cache_size apart.
-// For direct-mapped or low associativity this can thrash.
-static void trace_same_set_conflict(Cache& cache,
-                                   uint64_t cache_size_bytes,
-                                   uint64_t hot_lines,
-                                   uint64_t accesses) {
+// Same-set conflict: demonstrates associativity/policy differences.
+// Addresses spaced cache_size apart map to same set for typical indexing.
+static void trace_same_set_conflict(Cache& cache, uint64_t cache_size_bytes, uint64_t hot_lines, uint64_t accesses) {
     uint64_t lat = 0;
-
-    // Addresses separated by cache_size_bytes map to same index (same set) for typical index function.
     std::vector<uint64_t> addrs;
     addrs.reserve(hot_lines);
     for (uint64_t i = 0; i < hot_lines; i++) {
@@ -53,7 +45,20 @@ static void trace_same_set_conflict(Cache& cache,
     }
 }
 
-// Helper: stringify policy for CSV
+// Stride walk within a working set: can show spatial locality effects + set conflicts depending on stride.
+static void trace_stride(Cache& cache, uint64_t working_set_bytes, uint64_t stride_bytes, uint64_t accesses) {
+    uint64_t lat = 0;
+    uint64_t addr = 0;
+    for (uint64_t i = 0; i < accesses; i++) {
+        cache.access(addr, lat);
+        addr = (addr + stride_bytes) % working_set_bytes;
+    }
+}
+
+// -----------------------------
+// Helpers
+// -----------------------------
+
 static const char* policy_name(ReplacementPolicy p) {
     switch (p) {
         case ReplacementPolicy::LRU:    return "LRU";
@@ -63,12 +68,13 @@ static const char* policy_name(ReplacementPolicy p) {
     }
 }
 
-// Write one CSV row
 static void write_row(std::ofstream& out,
                       const std::string& experiment,
                       size_t cache_kb,
                       size_t line_size,
                       size_t assoc,
+                      size_t hit_latency,
+                      size_t miss_penalty,
                       ReplacementPolicy pol,
                       const std::string& trace_name,
                       uint64_t working_set_kb,
@@ -81,6 +87,8 @@ static void write_row(std::ofstream& out,
         << cache_kb << ","
         << line_size << ","
         << assoc << ","
+        << hit_latency << ","
+        << miss_penalty << ","
         << policy_name(pol) << ","
         << trace_name << ","
         << working_set_kb << ","
@@ -93,116 +101,210 @@ static void write_row(std::ofstream& out,
 }
 
 int main() {
-    // Timing model (simple)
-    const size_t hit_latency = 1;
-    const size_t miss_penalty = 100;
-
-    std::ofstream out("results.csv");
-    out << "experiment,cache_kb,line_size,assoc,policy,trace,working_set_kb,stride_bytes,miss_rate,amat,hits,misses\n";
-
     // -----------------------------
     // Baseline configuration
-    // We'll change ONE parameter at a time from this baseline.
     // -----------------------------
-    const size_t base_cache_kb = 32;
-    const size_t base_line_size = 64;
-    const size_t base_assoc = 4;
+    const size_t base_cache_kb   = 32;
+    const size_t base_line_size  = 64;
+    const size_t base_assoc      = 4;
+    const size_t base_hit_lat    = 1;
+    const size_t base_miss_pen   = 100;
     const ReplacementPolicy base_policy = ReplacementPolicy::LRU;
 
-    // Traces (kept simple and stable)
-    const uint64_t stream_bytes = 1ull << 20;         // 1MB stream
-    const uint64_t stream_step = 4;                   // word step
-    const uint64_t reuse_ws_kb = 24;                  // < 32KB so it can fit in baseline cache
-    const uint64_t reuse_passes = 50;
-    const uint64_t conflict_accesses = 200000;
+    // Trace knobs (kept stable)
+    const uint64_t stream_bytes   = 1ull << 20;  // 1MB
+    const uint64_t step_word      = 4;
+    const uint64_t reuse_passes   = 50;
+    const uint64_t conflict_acc   = 200000;
+    const uint64_t stride_acc     = 200000;
+
+    MemoryTiming mem;
+    mem.fixed_latency_cycles = 60;  // tune this
+    mem.bytes_per_cycle = 16;       // 16B/cycle
+
+    std::ofstream out("results.csv");
+    out << "experiment,cache_kb,line_size,assoc,hit_latency,miss_penalty,policy,trace,working_set_kb,stride_bytes,miss_rate,amat,hits,misses\n";
 
     // -----------------------------
-    // 0) Baseline run (so plots have a reference point)
+    // 0) Baseline run (reference point)
     // -----------------------------
     {
-        Cache c(base_cache_kb * 1024, base_line_size, base_assoc, hit_latency, miss_penalty, base_policy);
+        const uint64_t reuse_ws_kb = 24;
+        Cache c(base_cache_kb * 1024, base_line_size, base_assoc, base_hit_lat, base_miss_pen, base_policy);
         c.reset_stats();
-        trace_reuse_working_set(c, reuse_ws_kb * 1024, stream_step, reuse_passes);
+        trace_reuse_working_set(c, reuse_ws_kb * 1024, step_word, reuse_passes);
 
         write_row(out, "baseline",
-                  base_cache_kb, base_line_size, base_assoc, base_policy,
-                  "reuse_working_set",
+                  base_cache_kb, base_line_size, base_assoc, base_hit_lat, base_miss_pen,
+                  base_policy, "reuse_working_set",
                   reuse_ws_kb, 0,
                   c.get_miss_rate(), c.get_amat(), c.get_hits(), c.get_misses());
     }
 
     // -----------------------------
-    // 1) Change ONLY cache size (capacity effect)
-    // Keep line size, assoc, policy fixed.
-    // Use reuse_working_set trace so cache size actually matters.
+    // 1) Sweep cache size (capacity effect) - reuse workload
     // -----------------------------
-    for (size_t cache_kb : {4, 8, 16, 24, 32, 48, 64, 96, 128}) {
-        Cache c(cache_kb * 1024, base_line_size, base_assoc, hit_latency, miss_penalty, base_policy);
-        c.reset_stats();
-        trace_reuse_working_set(c, reuse_ws_kb * 1024, stream_step, reuse_passes);
+    {
+        const uint64_t reuse_ws_kb = 24;
+        for (size_t cache_kb : {4, 8, 16, 24, 32, 48, 64, 96, 128}) {
+            Cache c(cache_kb * 1024, base_line_size, base_assoc, base_hit_lat, base_miss_pen, base_policy);
+            c.reset_stats();
+            trace_reuse_working_set(c, reuse_ws_kb * 1024, step_word, reuse_passes);
 
-        write_row(out, "sweep_cache_size",
-                  cache_kb, base_line_size, base_assoc, base_policy,
-                  "reuse_working_set",
-                  reuse_ws_kb, 0,
-                  c.get_miss_rate(), c.get_amat(), c.get_hits(), c.get_misses());
+            write_row(out, "sweep_cache_size",
+                      cache_kb, base_line_size, base_assoc, base_hit_lat, base_miss_pen,
+                      base_policy, "reuse_working_set",
+                      reuse_ws_kb, 0,
+                      c.get_miss_rate(), c.get_amat(), c.get_hits(), c.get_misses());
+        }
     }
 
     // -----------------------------
-    // 2) Change ONLY associativity (conflict effect)
-    // Keep cache size, line size, policy fixed.
-    // Use a same-set conflict trace to make associativity show up clearly.
-    // We set hot_lines = assoc + 1 to force thrash when assoc is too small.
+    // 2) Sweep associativity (conflict effect)
     // -----------------------------
-    for (size_t assoc : {1, 2, 4, 8, 16}) {
-        Cache c(base_cache_kb * 1024, base_line_size, assoc, hit_latency, miss_penalty, base_policy);
-        c.reset_stats();
+    {
+        for (size_t assoc : {1, 2, 4, 8, 16}) {
+            Cache c(base_cache_kb * 1024, base_line_size, assoc, base_hit_lat, base_miss_pen, base_policy);
+            c.reset_stats();
 
-        const uint64_t hot_lines = static_cast<uint64_t>(assoc) + 1; // slightly more than ways
-        trace_same_set_conflict(c, base_cache_kb * 1024, hot_lines, conflict_accesses);
+            const uint64_t hot_lines = static_cast<uint64_t>(assoc) + 1;
+            trace_same_set_conflict(c, base_cache_kb * 1024, hot_lines, conflict_acc);
 
-        write_row(out, "sweep_associativity",
-                  base_cache_kb, base_line_size, assoc, base_policy,
-                  "same_set_conflict",
-                  0, 0,
-                  c.get_miss_rate(), c.get_amat(), c.get_hits(), c.get_misses());
+            write_row(out, "sweep_associativity",
+                      base_cache_kb, base_line_size, assoc, base_hit_lat, base_miss_pen,
+                      base_policy, "same_set_conflict",
+                      0, 0,
+                      c.get_miss_rate(), c.get_amat(), c.get_hits(), c.get_misses());
+        }
     }
 
     // -----------------------------
-    // 3) Change ONLY line size (spatial locality effect)
-    // Keep cache size, assoc, policy fixed.
-    // Use streaming sequential so line size impacts miss rate strongly.
+    // 3) Sweep line size (spatial locality on streaming)
     // -----------------------------
-    for (size_t line_sz : {16, 32, 64, 128, 256}) {
-        Cache c(base_cache_kb * 1024, line_sz, base_assoc, hit_latency, miss_penalty, base_policy);
-        c.reset_stats();
-        trace_stream_sequential(c, stream_bytes, stream_step);
+    {
+        for (size_t line_sz : {16, 32, 64, 128, 256}) {
+            Cache c(base_cache_kb * 1024, line_sz, base_assoc, base_hit_lat, mem, base_policy);
+            c.reset_stats();
+            trace_stream_sequential(c, stream_bytes, step_word);
 
-        write_row(out, "sweep_line_size",
-                  base_cache_kb, line_sz, base_assoc, base_policy,
-                  "stream_sequential",
-                  0, 0,
-                  c.get_miss_rate(), c.get_amat(), c.get_hits(), c.get_misses());
+            write_row(out, "sweep_line_size",
+                      base_cache_kb, line_sz, base_assoc, base_hit_lat, base_miss_pen,
+                      base_policy, "stream_sequential",
+                      0, 0,
+                      c.get_miss_rate(), c.get_amat(), c.get_hits(), c.get_misses());
+        }
     }
 
     // -----------------------------
-    // 4) Change ONLY replacement policy
-    // Keep cache size, line size, assoc fixed.
-    // Use a conflict-ish pattern where policy differences can show up.
-    // (assoc+1 hot lines cycling inside one set)
+    // 4) Sweep replacement policy (conflict-ish trace)
     // -----------------------------
-    for (ReplacementPolicy pol : {ReplacementPolicy::LRU, ReplacementPolicy::FIFO, ReplacementPolicy::RANDOM}) {
-        Cache c(base_cache_kb * 1024, base_line_size, base_assoc, hit_latency, miss_penalty, pol);
-        c.reset_stats();
+    {
+        for (ReplacementPolicy pol : {ReplacementPolicy::LRU, ReplacementPolicy::FIFO, ReplacementPolicy::RANDOM}) {
+            Cache c(base_cache_kb * 1024, base_line_size, base_assoc, base_hit_lat, base_miss_pen, pol);
+            c.reset_stats();
 
-        const uint64_t hot_lines = static_cast<uint64_t>(base_assoc) + 1;
-        trace_same_set_conflict(c, base_cache_kb * 1024, hot_lines, conflict_accesses);
+            const uint64_t hot_lines = static_cast<uint64_t>(base_assoc) + 1;
+            trace_same_set_conflict(c, base_cache_kb * 1024, hot_lines, conflict_acc);
 
-        write_row(out, "sweep_policy",
-                  base_cache_kb, base_line_size, base_assoc, pol,
-                  "same_set_conflict",
-                  0, 0,
-                  c.get_miss_rate(), c.get_amat(), c.get_hits(), c.get_misses());
+            write_row(out, "sweep_policy_conflict",
+                      base_cache_kb, base_line_size, base_assoc, base_hit_lat, base_miss_pen,
+                      pol, "same_set_conflict",
+                      0, 0,
+                      c.get_miss_rate(), c.get_amat(), c.get_hits(), c.get_misses());
+        }
+    }
+
+    // -----------------------------
+    // 5) Sweep working set size (capacity curve)
+    // Keep cache fixed; change only working set.
+    // -----------------------------
+    {
+        for (uint64_t ws_kb : {4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 64, 96, 128}) {
+            Cache c(base_cache_kb * 1024, base_line_size, base_assoc, base_hit_lat, base_miss_pen, base_policy);
+            c.reset_stats();
+            trace_reuse_working_set(c, ws_kb * 1024, step_word, reuse_passes);
+
+            write_row(out, "sweep_working_set",
+                      base_cache_kb, base_line_size, base_assoc, base_hit_lat, base_miss_pen,
+                      base_policy, "reuse_working_set",
+                      ws_kb, 0,
+                      c.get_miss_rate(), c.get_amat(), c.get_hits(), c.get_misses());
+        }
+    }
+
+    // -----------------------------
+    // 6) Sweep stride (stride effects within a fixed working set)
+    // Keep cache + WS fixed; change only stride.
+    // -----------------------------
+    {
+        const uint64_t ws_kb = 32; // same as cache size for interesting behavior
+        for (uint64_t stride : {4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048}) {
+            Cache c(base_cache_kb * 1024, base_line_size, 1 /*direct-mapped*/, base_hit_lat, base_miss_pen, base_policy);
+            c.reset_stats();
+            trace_stride(c, ws_kb * 1024, stride, stride_acc);
+
+            write_row(out, "sweep_stride",
+                      base_cache_kb, base_line_size, 1, base_hit_lat, base_miss_pen,
+                      base_policy, "stride_walk",
+                      ws_kb, stride,
+                      c.get_miss_rate(), c.get_amat(), c.get_hits(), c.get_misses());
+        }
+    }
+
+    // -----------------------------
+    // 7) Sweep miss penalty (timing sensitivity)
+    // Miss rate stays same; AMAT changes.
+    // -----------------------------
+    {
+        const uint64_t reuse_ws_kb = 24;
+        for (size_t mp : {10, 25, 50, 75, 100, 150, 200, 300}) {
+            Cache c(base_cache_kb * 1024, base_line_size, base_assoc, base_hit_lat, mp, base_policy);
+            c.reset_stats();
+            trace_reuse_working_set(c, reuse_ws_kb * 1024, step_word, reuse_passes);
+
+            write_row(out, "sweep_miss_penalty",
+                      base_cache_kb, base_line_size, base_assoc, base_hit_lat, mp,
+                      base_policy, "reuse_working_set",
+                      reuse_ws_kb, 0,
+                      c.get_miss_rate(), c.get_amat(), c.get_hits(), c.get_misses());
+        }
+    }
+
+    // -----------------------------
+    // 8) Sweep hit latency (timing sensitivity)
+    // Miss rate stays same; AMAT shifts by constant.
+    // -----------------------------
+    {
+        const uint64_t reuse_ws_kb = 24;
+        for (size_t hl : {1, 2, 3, 4, 5}) {
+            Cache c(base_cache_kb * 1024, base_line_size, base_assoc, hl, base_miss_pen, base_policy);
+            c.reset_stats();
+            trace_reuse_working_set(c, reuse_ws_kb * 1024, step_word, reuse_passes);
+
+            write_row(out, "sweep_hit_latency",
+                      base_cache_kb, base_line_size, base_assoc, hl, base_miss_pen,
+                      base_policy, "reuse_working_set",
+                      reuse_ws_kb, 0,
+                      c.get_miss_rate(), c.get_amat(), c.get_hits(), c.get_misses());
+        }
+    }
+
+    // -----------------------------
+    // 9) Policy sweep on locality-heavy workload (LRU should look good here)
+    // -----------------------------
+    {
+        const uint64_t reuse_ws_kb = 24;
+        for (ReplacementPolicy pol : {ReplacementPolicy::LRU, ReplacementPolicy::FIFO, ReplacementPolicy::RANDOM}) {
+            Cache c(base_cache_kb * 1024, base_line_size, base_assoc, base_hit_lat, base_miss_pen, pol);
+            c.reset_stats();
+            trace_reuse_working_set(c, reuse_ws_kb * 1024, step_word, reuse_passes);
+
+            write_row(out, "sweep_policy_locality",
+                      base_cache_kb, base_line_size, base_assoc, base_hit_lat, base_miss_pen,
+                      pol, "reuse_working_set",
+                      reuse_ws_kb, 0,
+                      c.get_miss_rate(), c.get_amat(), c.get_hits(), c.get_misses());
+        }
     }
 
     std::cout << "Wrote results.csv\n";
